@@ -1,0 +1,6 @@
+# Copy this file to terraform.tfvars and fill in real values.
+# terraform.tfvars is gitignored — never commit it.
+
+subscription_id = "00000000-0000-0000-0000-000000000000"
+ssh_public_key  = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...your-key-here... you@example.com"
+db_app_password = "replace-with-a-real-secret"
