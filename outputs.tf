@@ -7,3 +7,13 @@ output "private_subnet_cidr" {
   description = "CIDR block of the private subnet reserved for AKS"
   value       = azurerm_subnet.private.address_prefixes[0]
 }
+
+output "storage_account_name" {
+  description = "Name of the storage account holding MongoDB backups"
+  value       = azurerm_storage_account.backups.name
+}
+
+output "backup_container_url" {
+  description = "Public URL of the (intentionally public) MongoDB backup blob container"
+  value       = "${azurerm_storage_account.backups.primary_blob_endpoint}${azurerm_storage_container.backups.name}"
+}

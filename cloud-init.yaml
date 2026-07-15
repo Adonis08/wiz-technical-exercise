@@ -42,5 +42,15 @@ write_files:
 
       systemctl restart mongod
 
+  - path: /opt/backup-mongo.sh
+    encoding: b64
+    permissions: '0700'
+    content: ${backup_script_b64}
+
+  - path: /etc/cron.d/mongo-backup
+    permissions: '0644'
+    content: |
+      0 2 * * * root /opt/backup-mongo.sh >> /var/log/mongo-backup.log 2>&1
+
 runcmd:
   - bash /opt/setup-mongo.sh

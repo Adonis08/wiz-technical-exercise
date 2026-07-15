@@ -21,6 +21,15 @@ resource "azurerm_network_interface" "db" {
 
 data "azurerm_subscription" "current" {}
 
+locals {
+  backup_script = templatefile("${path.module}/backup-mongo.sh.tpl", {
+    db_app_username      = var.db_app_username
+    db_app_password      = var.db_app_password
+    storage_account_name = azurerm_storage_account.backups.name
+    container_name       = azurerm_storage_container.backups.name
+  })
+}
+
 # INTENTIONAL MISCONFIG: Ubuntu 20.04 LTS — deliberately outdated (current
 # LTS is 24.04) so this VM is carrying 1+ year of unpatched OS-level CVEs,
 # on top of the exposed SSH port.
@@ -57,8 +66,9 @@ resource "azurerm_linux_virtual_machine" "db" {
   }
 
   custom_data = base64encode(templatefile("${path.module}/cloud-init.yaml", {
-    db_app_username = var.db_app_username
-    db_app_password = var.db_app_password
+    db_app_username   = var.db_app_username
+    db_app_password   = var.db_app_password
+    backup_script_b64 = base64encode(local.backup_script)
   }))
 }
 

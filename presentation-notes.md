@@ -116,3 +116,69 @@ A **network foundation** and the **database tier** of the two-tier app, entirely
 - **"How would you fix the SSH exposure?"** → Azure Bastion or a jump box, source-range restriction to corporate IPs, and just-in-time access.
 - **"So which one do you fix first?"** → The identity. It's the multiplier — it's what converts every other issue from 'a bad day' into 'a breach'. Remove Contributor and the same SSH exposure is a contained problem.
 
+---
+
+# Stage 2 — Presentation Notes
+### Automated MongoDB backups + public storage container (intentionally misconfigured)
+
+---
+
+## What we built
+
+Automated backups for the database tier, entirely in Terraform + a shell script:
+
+- **Storage account** (`storage.tf`) — `azurerm_storage_account.backups`, random 6-char suffix for global uniqueness, LRS replication
+- **`allow_nested_items_to_be_public = true`** — overrides Azure's *default* guardrail, which normally blocks anonymous access account-wide on new storage accounts
+- **Blob container** — `mongo-backups`, `container_access_type = "container"`, which grants **anonymous read AND list**
+- **Least-privilege identity, done right this time** — the VM's managed identity gets `Storage Blob Data Contributor` scoped to just *this one storage account* (contrast with Stage 1's subscription-wide Contributor grant — this is the fix pattern applied)
+- **`backup-mongo.sh.tpl`** — cron job, runs daily at 02:00: `mongodump` → tar.gz → pulls an IMDS token for the VM's identity, scoped to `storage.azure.com` → `PUT`s the archive straight to blob storage over the REST API, no stored key anywhere
+- **Outputs** — `storage_account_name` and `backup_container_url`, so the public URL is printed right after `apply` (a nice "look how easy this is to find" demo beat)
+
+---
+
+## The misconfiguration
+
+| Misconfig | Severity alone | Role in the chain |
+|---|---|---|
+| Public **read + list** on the backup container | Critical | **The exfil path that skips the database entirely** |
+
+---
+
+## COLD ANSWER — Why does a public backup container matter more than it sounds?
+
+> "The database itself is configured properly in this build — auth is on, network access is restricted. But none of that matters, because the backups **bypass it completely**. An attacker doesn't need the database — the backups *are* the data, sitting on the open internet with zero authentication.
+>
+> And the dangerous part isn't just 'public read.' It's that this container also grants **public list**. That means an attacker doesn't have to guess filenames or brute-force a timestamp pattern — they can enumerate the entire container and see every backup that's ever been written, then just pull whichever one they want. Read plus list turns 'maybe you get lucky' into 'here's the full inventory, help yourself.'
+>
+> This is also the classic blind spot: **'it's just a backup bucket.'** Backups get treated as an operational afterthought — a thing ops sets up for disaster recovery — not as a copy of the crown jewels that deserves the same controls as the primary database. In practice, the crown jewels don't leak through the front door. They leak through the copy nobody was watching."
+
+**The "so what":** *An attacker doesn't need to breach the database if the backup of the database is sitting in the open. The copy is the data.*
+
+---
+
+## THE ENTERPRISE PROBLEM
+
+> "For a financial-services organisation, this container isn't holding abstract 'data' — it's holding customer financial records, unauthenticated, discoverable by anyone who finds the storage account name. That's not a hypothetical risk, that's a **direct regulatory breach**: GDPR if there's EU customer data, DORA if this is a regulated EU financial entity's ICT infrastructure. Either way, this is the kind of exposure that triggers mandatory breach notification, not just an internal ticket.
+>
+> And notice the chain this stage adds: I *fixed* the identity problem from Stage 1 — the VM's role here is scoped to just this one storage account, not subscription-wide Contributor. That's the textbook remediation. But it doesn't matter, because the container's own access policy makes identity irrelevant. You don't need the VM's token, you don't need any credential at all — anonymous HTTP GET is enough. **Least-privilege identity doesn't help you if the resource itself is configured to hand the data to anyone who asks.**"
+
+**The "so what":** *Identity and network controls are necessary but not sufficient — a public resource policy defeats them both from underneath.*
+
+---
+
+## The fix
+
+- **Private by default** — `container_access_type = "private"`, and don't set `allow_nested_items_to_be_public` at the account level; let Azure's default guardrail do its job instead of overriding it
+- **Encryption** — enable/confirm encryption at rest (Storage Service Encryption, on by default) and enforce HTTPS-only transfer
+- **Access via identity, not anonymity** — the VM already has a scoped managed identity; reads for restore should go through that identity or short-lived SAS tokens, never anonymous access
+- **Detection tooling** — this is exactly the class of finding Microsoft Defender for Cloud / Defender for Storage flags automatically: public storage accounts, and (with sensitive data discovery enabled) public storage that *also* contains sensitive data gets escalated in severity — because "public bucket" and "public bucket full of financial records" are very different risk levels
+
+---
+
+## Panel-proofing: the likely follow-ups
+
+- **"How would you fix this?"** → Flip `container_access_type` to `private`, remove the account-level override, and route restores through the VM's existing scoped managed identity or short-lived SAS tokens instead of anonymous access.
+- **"Isn't Storage Blob Data Contributor scoped to one account good enough?"** → It's necessary but not sufficient — it governs the *identity's* access, not the *container's* access policy. A public container is readable by anyone with zero credentials, so scoping the identity doesn't close the hole.
+- **"Why is public list worse than public read alone?"** → Read without list still requires knowing or guessing exact filenames. List turns the container into a directory anyone can browse — the attacker gets the full inventory for free.
+- **"How would Defender for Cloud actually catch this?"** → It flags public storage accounts as a standing posture finding, and with sensitive data discovery enabled, it correlates *what's* in the container — customer/financial data — to bump the severity, which is exactly the "context over raw finding count" theme from Stage 1.
+
