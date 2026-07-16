@@ -23,3 +23,6 @@ override.tf.json
 # CLI configuration files
 .terraformrc
 terraform.rc
+
+# Kubernetes manifests holding real secret values (e.g. k8s/01-secret.local.yaml)
+k8s/*.local.yaml

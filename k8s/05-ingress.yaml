@@ -1,0 +1,27 @@
+# Routes external HTTP traffic (arriving at the ingress-nginx controller's
+# Azure Load Balancer) to the todo-app Service. No host is set, so this
+# matches any hostname — fine for a demo with no real domain name pointed
+# at the IP.
+#
+# ingressClassName: nginx must match the IngressClass the ingress-nginx
+# controller registers itself under (see README-style note in this repo /
+# the apply instructions for the controller install command — that's a
+# separate upstream component, not one of our own manifests).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: todo-app
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: todo-app
+                port:
+                  number: 80

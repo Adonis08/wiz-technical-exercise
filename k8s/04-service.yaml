@@ -1,0 +1,16 @@
+# ClusterIP: only reachable from inside the cluster (by the Ingress
+# controller, in this case). It's the Deployment's pods that get real
+# traffic — this Service just gives those pods a single stable name/IP
+# to be reached at, since pods themselves get replaced and re-IP'd
+# constantly.
+apiVersion: v1
+kind: Service
+metadata:
+  name: todo-app
+spec:
+  type: ClusterIP
+  selector:
+    app: todo-app
+  ports:
+    - port: 80
+      targetPort: 3000

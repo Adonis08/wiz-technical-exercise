@@ -182,3 +182,120 @@ Automated backups for the database tier, entirely in Terraform + a shell script:
 - **"Why is public list worse than public read alone?"** → Read without list still requires knowing or guessing exact filenames. List turns the container into a directory anyone can browse — the attacker gets the full inventory for free.
 - **"How would Defender for Cloud actually catch this?"** → It flags public storage accounts as a standing posture finding, and with sensitive data discovery enabled, it correlates *what's* in the container — customer/financial data — to bump the severity, which is exactly the "context over raw finding count" theme from Stage 1.
 
+---
+
+# Stage 3 — Presentation Notes
+### AKS cluster + ACR (application tier)
+
+---
+
+## Notes
+
+**3a — Public API server, private nodes.** Cluster nodes sit in `private-subnet` (good practice, per spec). The AKS **API server** is left publicly reachable (`private_cluster_enabled = false`) so `kubectl` works directly from a laptop — a deliberate simplification, not an oversight. In production I'd set `private_cluster_enabled = true` and put a bastion/jump box (or VPN) inside the VNet to reach the API server at all, the same pattern as the Stage 1 SSH fix. Worth stating proactively so the panel sees I know the tradeoff, rather than waiting to be asked "isn't the API server exposed?"
+
+# Stage 3b — Presentation Notes
+### Container build, image validation, and registry push
+
+---
+
+## What we built
+
+- A minimal **Node.js/Express todo app** that reads its MongoDB connection string from an **environment variable** (`MONGODB_URI`) — never hardcoded, because Kubernetes injects it at deploy time per the spec
+- A **Dockerfile** that builds the app image and `COPY`s **`wizexercise.txt`** (containing my name) into it
+- Image built for **`linux/amd64`**, validated locally, tagged and pushed to **Azure Container Registry**
+- AKS pulls from ACR via **managed identity** (`AcrPull` role) — no registry credentials anywhere
+
+---
+
+## Required demonstration: how `wizexercise.txt` got in, and proof it's there
+
+**How it got in:** a `COPY` instruction in the Dockerfile — so it's baked into the image at **build time**, as an immutable layer.
+
+**Proof it's in the image:**
+```bash
+docker run --rm --platform linux/amd64 todo-app:v1 cat /app/wizexercise.txt
+# → Adon Blackwood
+```
+*(In 3d, same proof from inside the running pod via `kubectl exec`.)*
+
+**Why validate at all?** There's a difference between a file being *on my laptop* and a file being *inside the image*. This proves the `COPY` actually worked — evidence, not assumption.
+
+---
+
+## COLD ANSWER 1 — "If someone deleted `wizexercise.txt` and rebuilt right now?"
+
+> "**The build would fail immediately** — `COPY` is a build-time instruction reading from the local build context. No file on disk, no image. Hard error, not a warning.
+>
+> But here's the important part: **the existing `todo-app:v1` image would be completely unaffected**. Images are **immutable**. Once built, that file is a permanent layer — not a link to my filesystem. I could wipe this laptop entirely and any machine that pulls `v1` would still print my name.
+>
+> That immutability cuts both ways, and it's the security point. It's *good*: what I tested is exactly what runs in production — no drift, no surprises. It's also *why image scanning matters*: a vulnerable library baked in at build time stays vulnerable in **every running copy, forever**, until someone rebuilds. You can't patch an image in place. You rebuild and redeploy — which means your pipeline, not your ops team, is your patching mechanism."
+
+**The "so what":** *Immutability means your build is your production reality. Whatever you didn't catch at build time, you're running everywhere.*
+
+---
+
+## COLD ANSWER 2 — "Why `COPY package*.json` + `npm install` before `COPY server.js`?"
+
+> "**Layer caching.** Docker builds in layers, one per instruction, and caches each. On rebuild it reuses cached layers until it hits the first change — and once a layer is invalidated, **everything after it rebuilds too**.
+>
+> If I copied everything at once, then `npm install`, one line changed in `server.js` would invalidate the COPY layer, which invalidates `npm install`, and I'd re-download the entire dependency tree. Every build. Every commit.
+>
+> By copying the **dependency manifest first** and installing, that expensive layer stays cached across all my code edits. Only the last layer rebuilds.
+>
+> **The rule:** order instructions from least-likely-to-change to most-likely-to-change. Dependencies change rarely; code changes constantly.
+>
+> In a CI/CD pipeline that's the difference between a 20-second build and a 3-minute one — on every single commit, across every developer. It compounds fast."
+
+**The "so what":** *Build speed is a security control. Slow pipelines get bypassed, and bypassed pipelines skip scanning.*
+
+---
+
+## COLD ANSWER 3 — "`az acr login` didn't ask for credentials. What identity did it use, and why is that better than `admin_enabled = true`?"
+
+> "It used my **Entra ID identity** from the earlier `az login`. The CLI exchanged my existing Entra token for a **short-lived registry refresh token** and handed that to Docker. No username, no password — because I was already authenticated as *me*.
+>
+> Compare that to ACR admin credentials:
+
+| | Entra ID (what I used) | ACR admin user |
+|---|---|---|
+| Credential | Short-lived token, auto-expires | Static password, lives forever |
+| Who is it? | *Me* — attributable | Shared account — anonymous |
+| Permissions | RBAC-scoped (`AcrPull` vs `AcrPush`) | All-or-nothing full admin |
+| Revocation | Disable the user | Rotate key + update every consumer |
+| Audit trail | "Adon pushed this image" | "Someone pushed this image" |
+| MFA / conditional access | ✅ | ❌ |
+
+> "The core problem with admin creds is that they're a **shared, long-lived, non-attributable secret with full rights** — and shared secrets go where secrets go: a pipeline variable, a `.env` file, a Slack message.
+>
+> And the blast radius isn't 'someone reads my images.' Admin means **push**. A leaked admin credential means an attacker plants a **backdoored image** that every node in my cluster pulls and runs. That's **supply-chain compromise** — and it's near-invisible, because the cluster is behaving exactly as designed.
+>
+> Better still: **AKS pulls from ACR using its own managed identity** with `AcrPull`. There is no credential in the cluster at all — nothing to leak, nothing to rotate."
+
+**The "so what":** *Identity-based auth beats shared secrets because you can attribute it, scope it, expire it, and revoke it. A static registry password is a supply-chain backdoor waiting to be pasted somewhere.*
+
+---
+
+## The contrast worth drawing (ties the whole story together)
+
+**This stage is what "done right" looks like — deliberately.**
+
+- Stage 1: root on the VM hands an attacker the DB password **and** an IMDS token. Secrets to steal.
+- Stage 3b: identity-based auth end-to-end. **No secret exists to steal.**
+
+Same principle, opposite outcome. Worth stating explicitly to the panel: it shows the misconfigurations elsewhere are *intentional*, not ignorance.
+
+---
+
+## Challenges & adaptations
+
+**Apple Silicon vs AKS architecture.** I'm building on an arm64 Mac; AKS nodes are x86_64/amd64. So I built explicitly with `--platform linux/amd64`. Running it locally then emits a platform-mismatch warning — that's Docker emulating amd64 on arm64, which is expected and *correct*.
+
+Had I ignored architecture and built arm64, the container would have crash-looped on the cluster with `exec format error` — a genuinely confusing failure to debug. Good example of validating against the **target** environment, not "works on my machine."
+
+---
+
+## Likely follow-ups
+
+- **"How would you stop someone planting a malicious file this way?"** → Image scanning in the pipeline (Stage 4), signed images / trusted base images, admission control that rejects unsigned or unscanned images, and branch protection so Dockerfile changes need review.
+- **"What's in your base image?"** → That's the point of SBOM and scanning — most vulnerabilities come from dependencies and base layers, not code I wrote.
+- **"Why env var instead of baking the connection string in?"** → Secrets in an image are permanent and readable by anyone who pulls it. Env var injection at deploy time keeps config out of the artifact — per the spec, and the right pattern regardless.

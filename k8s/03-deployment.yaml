@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: todo-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: todo-app
+  template:
+    metadata:
+      labels:
+        app: todo-app
+    spec:
+      # Uses the ServiceAccount created in 02-serviceaccount-rbac.yaml —
+      # this is what wires the pod up to the cluster-admin binding.
+      serviceAccountName: app-service-account
+      containers:
+        - name: todo-app
+          image: wizacrwnsx1e.azurecr.io/todo-app:v1
+          # No imagePullSecrets needed: AKS's kubelet identity already
+          # holds the AcrPull role on this ACR (see aks_acr_pull in
+          # aks.tf), so the node authenticates to the registry via Azure
+          # AD, not a stored credential.
+          ports:
+            - containerPort: 3000
+          env:
+            # Pulled from the Secret, not hardcoded — this is the "DB
+            # access via a K8s env variable" requirement from the spec.
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-uri
+                  key: MONGODB_URI
+          # Is the app ready to receive traffic? Kubernetes only sends
+          # Service traffic to pods that pass this. "/" needs a working
+          # Mongo connection to respond (server.js awaits the DB connect
+          # before app.listen()), so this doubles as a DB-connectivity
+          # check.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # Is the app still alive? If this fails repeatedly, Kubernetes
+          # kills and restarts the container.
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 20
