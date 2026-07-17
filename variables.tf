@@ -55,3 +55,9 @@ variable "db_app_password" {
   type        = string
   sensitive   = true
 }
+
+variable "github_repository" {
+  description = "GitHub repo in 'owner/repo' form — scopes the GitHub Actions OIDC federated credential's trust condition to exactly this repo."
+  type        = string
+  default     = "Adonis08/wiz-technical-exercise"
+}

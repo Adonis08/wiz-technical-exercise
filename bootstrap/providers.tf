@@ -15,17 +15,17 @@ terraform {
       version = "~> 2.53"
     }
   }
+
+  # Deliberately NO backend block here. This config's only job is to
+  # create the remote backend the MAIN config uses — it can't also store
+  # its own state there (nothing would exist yet to store it in). Its
+  # state stays local, in bootstrap/terraform.tfstate, forever. That's an
+  # accepted, standard tradeoff: this config is tiny and changes rarely.
 }
 
 provider "azurerm" {
   features {}
-
   subscription_id = var.subscription_id
 }
 
-# App registrations and federated credentials for GitHub Actions OIDC live
-# in Azure AD (Entra ID), a different API surface than plain Azure Resource
-# Manager (azurerm) — hence the separate provider. It authenticates using
-# the same `az login` session already active in this shell; no separate
-# credentials to configure.
 provider "azuread" {}
