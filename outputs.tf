@@ -3,6 +3,10 @@ output "db_vm_public_ip" {
   value       = azurerm_public_ip.db.ip_address
 }
 
+# Trivial comment-only change to trigger a real end-to-end pipeline test:
+# PR -> checkov + terraform plan + PR comment -> merge -> push -> terraform
+# apply, all as genuine GitHub Actions events rather than manual dispatch.
+
 output "private_subnet_cidr" {
   description = "CIDR block of the private subnet reserved for AKS"
   value       = azurerm_subnet.private.address_prefixes[0]
