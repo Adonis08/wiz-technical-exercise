@@ -32,3 +32,11 @@ output "aks_get_credentials_command" {
   description = "Command to configure kubectl to talk to this cluster"
   value       = "az aks get-credentials --resource-group ${azurerm_resource_group.main.name} --name ${azurerm_kubernetes_cluster.aks.name} --overwrite-existing"
 }
+
+# No terraform outputs for the GitHub Actions identity's client ID/tenant/
+# subscription: since github-ci-auth.tf now looks up a pre-provisioned
+# service principal (see that file's header comment for why) rather than
+# creating one, those values are already known upfront rather than
+# computed by this config — they were set directly as GitHub repo
+# variables (AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID) and
+# secret (AZURE_CLIENT_SECRET) without needing an output round-trip.

@@ -1,0 +1,150 @@
+name: IaC Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**.tf"
+  pull_request:
+    branches: [main]
+    paths:
+      - "**.tf"
+
+# NOTE: this workflow originally authenticated to Azure via OIDC (no
+# stored secret at all — see git history / presentation-notes.md Stage
+# 4a for the original design and Stage 4's pivot notes for why). That
+# required creating a new Azure AD app registration, which this lab
+# tenant blocks for non-admin identities. Lab support's guidance (see
+# presentation-notes.md) was to fall back to a pre-provisioned service
+# principal's client secret instead. `id-token: write` is removed below
+# because nothing here mints an OIDC token anymore — no sense keeping a
+# permission granted for a capability the workflow no longer uses.
+permissions:
+  contents: read
+  security-events: write # lets the SARIF upload step write to the Security tab
+  pull-requests: write   # lets the plan step comment on the PR
+
+jobs:
+  checkov:
+    name: IaC security scan (Checkov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # soft_fail: true is a DELIBERATE choice for this exercise, not an
+      # oversight. This repo's Terraform contains intentional
+      # misconfigurations (Stage 1/2's public storage account, open SSH
+      # NSG rule, the AKS cluster-admin binding, etc.) as the entire
+      # point of the exercise — if Checkov were allowed to fail the
+      # build on those, this pipeline could never deploy the very
+      # infrastructure the exercise exists to build and later remediate
+      # against Defender for Cloud findings. A production pipeline
+      # should NOT do this: it should hard-fail (soft_fail: false, the
+      # default) on CRITICAL/HIGH findings so misconfigured infra never
+      # reaches the cloud in the first place. Findings still show up
+      # here and in the Security tab either way — soft_fail only
+      # controls whether they block the merge/deploy.
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          framework: terraform
+          soft_fail: true
+          output_format: sarif
+          output_file_path: results.sarif
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: results.sarif
+
+  terraform:
+    name: Terraform plan/apply
+    runs-on: ubuntu-latest
+    needs: checkov
+    steps:
+      - uses: actions/checkout@v4
+
+      # Used for any raw `az` CLI calls this pipeline might grow later
+      # (e.g. `az aks get-credentials` in a future deploy-the-app job).
+      # Client-secret auth, not OIDC — see the permissions block comment
+      # above for why.
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+
+      # ARM_* env vars below are what the Terraform azurerm/azuread
+      # providers themselves read to authenticate — a separate handshake
+      # from azure/login above, both using the same service principal.
+      # ARM_CLIENT_SECRET is the one genuinely sensitive value in this
+      # whole pipeline; everything else here is an identifier, not a
+      # credential.
+      - name: Terraform init
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TF_STATE_CONTAINER }}" \
+            -backend-config="key=wiz-technical-exercise.tfstate" \
+            -backend-config="use_azuread_auth=true"
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform plan
+        run: terraform plan -no-color -input=false -out=tfplan
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_ssh_public_key: ${{ vars.SSH_PUBLIC_KEY }}
+          TF_VAR_db_app_password: ${{ secrets.DB_APP_PASSWORD }}
+
+      # Only runs on PRs. Posts the human-readable plan as a comment so
+      # a reviewer doesn't have to open the Actions log to see what would
+      # change.
+      - name: Post plan to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            let plan = execSync('terraform show -no-color tfplan').toString();
+            const maxLen = 60000; // GitHub comment body limit is ~65536 chars
+            if (plan.length > maxLen) {
+              plan = plan.slice(0, maxLen) + '\n... (truncated)';
+            }
+            const body = `#### Terraform Plan\n<details><summary>Show plan</summary>\n\n\`\`\`\n${plan}\n\`\`\`\n\n</details>`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      # Only runs on a direct push to main (i.e. after a PR merges).
+      # Applies exactly the plan that was just computed above — not a
+      # fresh plan — so what gets applied is guaranteed to match what was
+      # reviewed.
+      - name: Terraform apply
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: terraform apply -auto-approve -input=false tfplan
+        env:
+          ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}

@@ -11,6 +11,19 @@ resource "azurerm_container_registry" "acr" {
   admin_enabled       = false
 }
 
+# Required by the Defender profile below — Defender for Containers ships
+# its runtime findings here, not into Terraform state or the ARM API
+# directly. PerGB2018 is the standard pay-as-you-go tier; 30-day
+# retention is the minimum, kept short since this is a lab, not a
+# compliance-driven retention requirement.
+resource "azurerm_log_analytics_workspace" "aks" {
+  name                = "${var.prefix}-aks-logs"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  sku                 = "PerGB2018"
+  retention_in_days   = 30
+}
+
 # The AKS cluster. kubernetes_version is left unset so Terraform uses
 # whatever AKS's current default is at creation time, rather than us
 # hardcoding a version that might not exist in this region later.
@@ -28,6 +41,35 @@ resource "azurerm_kubernetes_cluster" "aks" {
   # below is still deployed into the private subnet either way, which is
   # what the exercise spec actually requires.
   private_cluster_enabled = false
+
+  # Codifies reality rather than leaving it as unmanaged drift: Azure
+  # enables the OIDC issuer by default on new AKS clusters running
+  # Kubernetes 1.34+ (this cluster is on 1.35), regardless of what's set
+  # here. It also cannot be disabled once on, so there's no "reverting"
+  # this — matching config to the actual state stops `terraform plan`
+  # from showing a phantom pending change on every run. On its own this
+  # does nothing (no pods use it yet) — it only becomes live once
+  # workload_identity_enabled and a federated identity credential are
+  # also configured, neither of which is done here.
+  oidc_issuer_enabled = true
+
+  # Azure Policy Add-on: without this, in-cluster Kubernetes objects
+  # (RoleBindings, pod security settings, etc.) are invisible to Azure
+  # Policy / Defender for Cloud entirely — including the intentional
+  # cluster-admin ClusterRoleBinding in k8s/02-serviceaccount-rbac.yaml.
+  # A policy assignment at the subscription level, on its own, cannot see
+  # inside the cluster without this add-on running as an in-cluster
+  # component.
+  azure_policy_enabled = true
+
+  # Defender for Containers' cluster-level sensor — a separate opt-in
+  # from the subscription-wide `Containers` Defender plan set earlier.
+  # That subscription-level plan controls billing/availability; this is
+  # what actually deploys the runtime sensor onto this specific cluster
+  # and points it at somewhere to send findings.
+  microsoft_defender {
+    log_analytics_workspace_id = azurerm_log_analytics_workspace.aks.id
+  }
 
   default_node_pool {
     name           = "default"
