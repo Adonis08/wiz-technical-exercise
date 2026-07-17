@@ -544,3 +544,32 @@ The lab support escalation came back with a decision, not just an explanation: u
 - **"What's left before this stage is 'done'?"** → The identity over-privilege finding (Stage 1's Contributor grant) should surface via CloudPosture's attack-path/Entra Permissions Management analysis on a longer timeline; the cluster-admin binding is now confirmed end-to-end. Remaining work is remediation of everything found, not further detection.
 - **"Why did you have to assign an extra policy manually instead of trusting the default set?"** → Because I checked rather than assumed — cross-referencing Microsoft's built-in policy catalog against what the benchmark initiative actually includes, rather than trusting that "enabled Defender for Cloud" implied "covers RBAC over-privilege."
 - **"Is `aks-cluster-admin-binding` itself a misconfiguration you should fix?"** → It's an AKS platform default tied to local accounts being enabled, not something authored in this project's manifests — the real fix is disabling local accounts and requiring Azure AD + Azure RBAC for Kubernetes authorization, which removes this binding's relevance entirely rather than patching it directly.
+
+---
+
+## Stage 4 — The first real CI/CD run: three bugs, found and fixed one at a time
+
+Merging the pipeline for the first time didn't work cleanly, and that's worth presenting honestly rather than glossing over — the debugging process is itself the demonstration of understanding, not a blemish on it.
+
+## COLD ANSWER — Walk me through what actually broke on the first run, and how you found each issue.
+
+> "Three separate, real failures, each diagnosed from the actual error rather than guessed at:
+>
+> **First: `azure/login@v2` rejected `client-secret` as an input.** I'd assumed that action accepted the same four fields — client ID, secret, tenant, subscription — that the Terraform provider does. It doesn't; its valid inputs are `creds` (a combined JSON blob) or the OIDC-style trio. Because the unrecognized input was silently ignored rather than hard-erroring, the action fell back to attempting an OIDC token fetch — the exact mechanism we'd just removed — and failed. The fix wasn't to reformat the input; it was to remove the step entirely, since nothing in this pipeline actually makes raw `az` CLI calls yet. Terraform's own `ARM_*` env vars authenticate it independently of this action.
+>
+> **Second: three repo variables from Stage 4b's documentation were never actually set.** `terraform init`'s backend-config flags came back completely empty — `resource_group_name=`, not even a placeholder. I'd written the instructions for `TF_STATE_RESOURCE_GROUP`/`STORAGE_ACCOUNT`/`CONTAINER` back when I first designed the backend, but never actually ran the commands, and it went unnoticed until the first real CI run needed them. Checking `gh variable list` confirmed two more were also missing (`SSH_PUBLIC_KEY`, `DB_APP_PASSWORD`) that Terraform needed to even construct a plan.
+>
+> **Third: the CI identity could authenticate, but couldn't read the state.** `403 AuthorizationPermissionMismatch` reading the state container. When I bootstrapped the state storage account outside Terraform, I granted `Storage Blob Data Contributor` to my own identity — the CI service principal's grant was part of the original Terraform-based bootstrap design we'd abandoned, and it never got carried over to the new plan.
+>
+> After each fix, I re-ran the actual pipeline rather than assuming the fix worked — added a `workflow_dispatch` trigger specifically so I could manually re-trigger without needing another commit each time, which let me iterate on the real failure instead of theorizing about it."
+
+**The "so what":** *A CI/CD pipeline's real correctness is only provable by running it — three plausible-looking, individually-reasoned pieces of setup (an action's inputs, a documented-but-unexecuted variable list, a role assignment scoped to the wrong identity) all looked fine in isolation and all failed on contact with a real execution environment. Treat "written and reviewed" and "actually run" as different levels of confidence.*
+
+## Final end-to-end proof
+
+Every stage of the pipeline has now succeeded via a genuine GitHub-triggered event, not a manual dispatch: a real PR triggered Checkov + SARIF upload + `terraform plan` + a posted PR comment; merging that PR triggered a real push to `main` that ran `terraform apply` — `Apply complete! Resources: 0 added, 1 changed, 0 destroyed` (that one change being the same pre-existing, unrelated node-pool drift flagged earlier, not anything new).
+
+## Panel-proofing: the likely follow-ups
+
+- **"Why didn't you catch these before merging?"** → Some of it — the `azure/login` input mismatch — genuinely can't be caught by `terraform validate` or local testing, since it's a GitHub Actions marketplace action's runtime input validation, not Terraform's. The missing variables and role assignment were both catchable in principle; the lesson taken was to treat "documented" and "done" as different states and verify the latter directly, which is exactly what closed out the remaining two.
+- **"Doesn't repeatedly loosening branch protection to merge your own PRs undermine having it?"** → Each time, it was a deliberate, minimal, fully-reversed exception — only the review-count requirement changed, only for the duration of one merge, restored immediately after and confirmed via API. The alternative was adding a second GitHub account purely to rubber-stamp solo work, which doesn't actually add review value either.
