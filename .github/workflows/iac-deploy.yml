@@ -9,6 +9,7 @@ on:
     branches: [main]
     paths:
       - "**.tf"
+  workflow_dispatch: {} # lets this be re-run manually without a .tf-touching commit
 
 # NOTE: this workflow originally authenticated to Azure via OIDC (no
 # stored secret at all — see git history / presentation-notes.md Stage
