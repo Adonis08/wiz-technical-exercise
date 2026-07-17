@@ -66,18 +66,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Used for any raw `az` CLI calls this pipeline might grow later
-      # (e.g. `az aks get-credentials` in a future deploy-the-app job).
-      # Client-secret auth, not OIDC — see the permissions block comment
-      # above for why.
-      - name: Azure login
-        uses: azure/login@v2
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-
+      # No azure/login step: this workflow only runs Terraform, which
+      # authenticates itself via the ARM_* env vars below — a separate
+      # mechanism from this action entirely. A first real run surfaced
+      # that azure/login@v2 has no `client-secret` input (only `creds`,
+      # a combined JSON blob, or the OIDC-style client-id/tenant-id/
+      # subscription-id trio) — since nothing here makes raw `az` CLI
+      # calls yet, removing this step is simpler than fixing it for a
+      # capability nothing uses. Add it back with `creds:
+      # ${{ secrets.AZURE_CREDENTIALS }}` (a JSON secret, not separate
+      # fields) if a future job step needs raw `az` CLI.
       - uses: hashicorp/setup-terraform@v3
 
       # ARM_* env vars below are what the Terraform azurerm/azuread
